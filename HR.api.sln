@@ -1,0 +1,34 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.32929.386
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HR.api", "HR.api\HR.api.csproj", "{F288A3CC-FE1E-4110-A0CF-B6496A81651B}"
+	ProjectSection(ProjectDependencies) = postProject
+		{F7231422-BF00-4867-987A-16C2C635B7A5} = {F7231422-BF00-4867-987A-16C2C635B7A5}
+	EndProjectSection
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ADO", "ADO\ADO.csproj", "{F7231422-BF00-4867-987A-16C2C635B7A5}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F288A3CC-FE1E-4110-A0CF-B6496A81651B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F288A3CC-FE1E-4110-A0CF-B6496A81651B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F288A3CC-FE1E-4110-A0CF-B6496A81651B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F288A3CC-FE1E-4110-A0CF-B6496A81651B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F7231422-BF00-4867-987A-16C2C635B7A5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F7231422-BF00-4867-987A-16C2C635B7A5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F7231422-BF00-4867-987A-16C2C635B7A5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F7231422-BF00-4867-987A-16C2C635B7A5}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {C4A62A26-313C-4255-8EFC-76D859630645}
+	EndGlobalSection
+EndGlobal
