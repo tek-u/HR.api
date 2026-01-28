@@ -1,0 +1,210 @@
+name: 'Deploy Container Apps'
+
+on:
+  workflow_dispatch:
+    inputs:
+      service-name:
+        description: 'Service name (e.g., bookmark-service)'
+        required: true
+        type: string
+      service-path:
+        description: 'Path to service directory (e.g., dotnet/services/bookmark-service)'
+        required: true
+        type: string
+      terraform-path:
+        description: 'Path to terraform directory (e.g., terraform/bookmark-service)'
+        required: true
+        type: string
+      azure-environment:
+        description: 'The Azure environment to deploy to (e.g., Dev, Qa, Prod)'
+        required: true
+        type: string
+        default: 'Dev'
+      changelog-file:
+        description: 'Changelog file to read version from (relative to service directory)'
+        required: false
+        type: string
+        default: 'CHANGELOG_Dev.md'
+
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+        description: 'Service name (e.g., bookmark-service)'
+      service-path:
+        required: true
+        type: string
+        description: 'Path to service directory (e.g., dotnet/services/bookmark-service)'
+      terraform-path:
+        required: true
+        type: string
+        description: 'Path to terraform directory (e.g., terraform/bookmark-service)'
+      azure-environment:
+        required: true
+        type: string
+        default: 'Dev'
+      commit-sha:
+        required: false
+        type: string
+        description: 'The commit SHA to use for Docker image tagging'
+      changelog-file:
+        required: false
+        type: string
+        default: 'CHANGELOG_Dev.md'
+        description: 'Changelog file to read version from (relative to service directory)'
+      semantic-version:
+        required: false
+        type: string
+        description: 'The semantic version from changelog (e.g., 1.0.0). If not provided, will be read from changelog file'
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.AZURE_AD_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_AD_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+  TF_VAR_resource_group_name: ${{ vars.RESOURCE_GROUP_NAME }}
+  TF_VAR_location: ${{ vars.RESOURCE_GROUP_LOCATION }}
+  TF_VAR_container_registry_name: ${{ vars.CONTAINER_REGISTRY_NAME }}
+  TF_VAR_app_insights_name: ${{ vars.APP_INSIGHTS_NAME }}
+  TF_VAR_container_apps_environment1: ${{ vars.CONTAINER_APP_FIRST_ENVIRONMENT_NAME }}
+  TF_VAR_container_apps_environment2: ${{ vars.CONTAINER_APP_SECOND_ENVIRONMENT_NAME }}
+  TF_VAR_umi_for_acr_pull: ${{ vars.UMI_FOR_CONTAINER_APPS }}
+  TF_VAR_tags: ${{ vars.TAGS }}
+  TF_VAR_container_image_tag: ${{ inputs.commit-sha || github.sha }}
+  TF_VAR_azure_environment: ${{ inputs.azure-environment }}
+  TF_VAR_infra_key_vault_name: ${{ vars.KV_VAULT_NAME_INFRA }}
+  TF_VAR_identity_for_key_infra_vault_access: ${{ vars.IDENTITY_FOR_INFRA_KV_ACCESS }}
+  TF_VAR_resource_group_name_infra: ${{ vars.RESOURCE_GROUP_NAME_INFRA }}
+  TF_VAR_backend_service_target_port: ${{ vars.PORT_FOR_NET_SERVICES }}
+  TF_VAR_keyvault_apps_name: ${{ vars.KV_VAULT_NAME_APPS }}
+
+jobs:
+  deploy-apps:
+    name: 'Deploy Container Apps'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.azure-environment }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        run: |
+          az login --service-principal \
+            -u ${{ secrets.AZURE_AD_CLIENT_ID }} \
+            -p ${{ secrets.AZURE_AD_CLIENT_SECRET }} \
+            --tenant ${{ secrets.AZURE_AD_TENANT_ID }}
+          az account set --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Confirm Subscription
+        run: az account show
+
+      - name: Generate Resource Token
+        id: set-token
+        shell: pwsh
+        run: |
+          $subscriptionId = "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+          $location = "${{ vars.RESOURCE_GROUP_LOCATION }}"
+          $environmentName = "${{ inputs.azure-environment }}"
+
+          $token = & ./scripts/Generate-ResourceToken.ps1 `
+              -SubscriptionId $subscriptionId `
+              -EnvironmentName $environmentName `
+              -Location $location
+
+          echo "TF_VAR_resource_token=$token" >> $env:GITHUB_ENV
+
+      - name: Get Version from Changelog
+        id: get-version
+        run: |
+          if [ -n "${{ inputs.semantic-version }}" ]; then
+            VERSION="${{ inputs.semantic-version }}"
+            echo "📋 Using provided version: $VERSION"
+          else
+            CHANGELOG_FILE="${{ inputs.service-path }}/${{ inputs.changelog-file }}"
+            chmod +x ./scripts/get-changelog-version.sh
+            VERSION=$(./scripts/get-changelog-version.sh "$CHANGELOG_FILE")
+            echo "📋 Version from $CHANGELOG_FILE: $VERSION"
+          fi
+          echo "TF_VAR_container_image_version=$VERSION" >> $GITHUB_ENV
+          echo "📋 Deploying version: $VERSION with commit: ${{ inputs.commit-sha || github.sha }}"
+
+      - name: Set Build Metadata
+        id: build-metadata
+        run: |
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "TF_VAR_build_date=$BUILD_DATE" >> $GITHUB_ENV
+          echo "📅 Build Date: $BUILD_DATE"
+
+      - name: Set Service-Specific Terraform Variables
+        run: |
+          SERVICE_NAME_SNAKE=$(echo "${{ inputs.service-name }}" | tr '-' '_')
+          SERVICE_NAME="${{ inputs.service-name }}"
+          CONTAINER_NAME="${SERVICE_NAME}-container"
+          
+          # Set TF_VAR_{service}_name and TF_VAR_{service}_container_name
+          echo "TF_VAR_${SERVICE_NAME_SNAKE}_name=${SERVICE_NAME}" >> $GITHUB_ENV
+          echo "TF_VAR_${SERVICE_NAME_SNAKE}_container_name=${CONTAINER_NAME}" >> $GITHUB_ENV
+          
+          echo "📦 Service: ${{ inputs.service-name }}"
+          echo "📦 Service name: ${SERVICE_NAME}"
+          echo "🏷️  Container name: ${CONTAINER_NAME}"
+          echo "🔧 Terraform path: ${{ inputs.terraform-path }}"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: latest
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: |
+          # Construct service-specific Terraform state config from service name
+          SERVICE_NAME_UPPER=$(echo "${{ inputs.service-name }}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
+          TF_STATE_CONTAINER_VAR="TF_${SERVICE_NAME_UPPER}_STATE_CONTAINER"
+          TF_STATE_KEY_VAR="TF_${SERVICE_NAME_UPPER}_STATE_FILE_KEY"
+          
+          TF_STATE_CONTAINER="${!TF_STATE_CONTAINER_VAR}"
+          TF_STATE_KEY="${!TF_STATE_KEY_VAR}"
+          
+          echo "🗄️  Terraform Backend Config:"
+          echo "   Resource Group: ${{ vars.TF_STATE_RG_NAME }}"
+          echo "   Storage Account: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}"
+          echo "   Container: ${TF_STATE_CONTAINER}"
+          echo "   State Key: ${TF_STATE_KEY}"
+          
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RG_NAME }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${TF_STATE_CONTAINER}" \
+            -backend-config="key=${TF_STATE_KEY}"
+        working-directory: ${{ inputs.terraform-path }}
+        env:
+          TF_BOOKMARK_SERVICE_STATE_CONTAINER: ${{ vars.TF_BOOKMARK_STATE_CONTAINER }}
+          TF_BOOKMARK_SERVICE_STATE_FILE_KEY: ${{ vars.TF_BOOKMARK_STATE_FILE_KEY }}
+          TF_ANNOTATION_SERVICE_STATE_CONTAINER: ${{ vars.TF_ANNOTATION_STATE_CONTAINER }}
+          TF_ANNOTATION_SERVICE_STATE_FILE_KEY: ${{ vars.TF_ANNOTATION_STATE_FILE_KEY }}
+          TF_STUDY_SERVICE_STATE_CONTAINER: ${{ vars.TF_STUDY_STATE_CONTAINER }}
+          TF_STUDY_SERVICE_STATE_FILE_KEY: ${{ vars.TF_STUDY_STATE_FILE_KEY }}
+          TF_STUDY_PROCESSOR_STATE_CONTAINER: ${{ vars.TF_STUDY_PROCESSOR_STATE_CONTAINER }}
+          TF_STUDY_PROCESSOR_STATE_FILE_KEY: ${{ vars.TF_STUDY_PROCESSOR_STATE_FILE_KEY }}
+
+      - name: Format Terraform Files
+        run: |
+          terraform fmt -recursive
+          terraform fmt -check -recursive
+        working-directory: ${{ inputs.terraform-path }}
+
+      - name: Validate Terraform Configuration
+        run: terraform validate
+        working-directory: ${{ inputs.terraform-path }}
+
+      - name: Plan Deployment
+        run: terraform plan -out=tfplan
+        working-directory: ${{ inputs.terraform-path }}
+
+      - name: Deploy using Terraform
+        run: |
+          terraform apply -auto-approve tfplan
+        working-directory: ${{ inputs.terraform-path }}
