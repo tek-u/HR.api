@@ -1,0 +1,196 @@
+name: 'Build Docker Images'
+
+on:
+  workflow_dispatch:
+    inputs:
+      service-name:
+        description: 'Service name (e.g., bookmark-service, annotation-service)'
+        required: true
+        type: string
+      service-path:
+        description: 'Path to service directory (e.g., dotnet/services/bookmark-service)'
+        required: true
+        type: string
+      azure-environment:
+        description: 'The Azure environment to deploy to (e.g., Dev, Qa, Prod)'
+        required: true
+        type: string
+        default: 'Dev'
+      changelog-file:
+        description: 'Changelog file to read version from (relative to service directory)'
+        required: false
+        type: string
+        default: 'CHANGELOG_Dev.md'
+      push-to-acr:
+        description: 'Whether to push the built images to ACR (true/false)'
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+        description: 'Service name (e.g., bookmark-service, annotation-service)'
+      service-path:
+        required: true
+        type: string
+        description: 'Path to service directory (e.g., dotnet/services/bookmark-service)'
+      azure-environment:
+        required: true
+        type: string
+        default: 'Dev'
+        description: 'The Azure environment to deploy to (e.g., Dev, Qa, Prod)'
+      push-to-acr:
+        required: false
+        type: boolean
+        default: true
+        description: 'Whether to push the built images to ACR'
+      commit-sha:
+        required: false
+        type: string
+        description: 'The commit SHA to use for Docker image tagging'
+      changelog-file:
+        required: false
+        type: string
+        default: 'CHANGELOG_Dev.md'
+        description: 'Changelog file to read version from (relative to service directory)'
+      semantic-version:
+        required: false
+        type: string
+        description: 'The semantic version from changelog (e.g., 1.0.0). If not provided, will be read from changelog file'
+
+env:
+  AZURE_ENVIRONMENT: ${{ inputs.azure-environment }}
+  ARM_CLIENT_ID: ${{ secrets.AZURE_AD_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_AD_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+
+jobs:
+  generate_docker_images:
+    name: 'Build Docker Image'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.azure-environment }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        if: ${{ inputs.push-to-acr == true }}
+        run: |
+          az login --service-principal \
+            -u ${{ secrets.AZURE_AD_CLIENT_ID }} \
+            -p ${{ secrets.AZURE_AD_CLIENT_SECRET }} \
+            --tenant ${{ secrets.AZURE_AD_TENANT_ID }}
+          az account set --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Confirm Subscription
+        if: ${{ inputs.push-to-acr == true }}
+        run: az account show
+
+      - name: Generate Resource Token
+        if: ${{ inputs.push-to-acr == true }}
+        id: set-token
+        shell: pwsh
+        run: |
+          $subscriptionId = "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+          $location = "${{ vars.RESOURCE_GROUP_LOCATION }}"
+          $environmentName = "${{ inputs.azure-environment }}"
+
+          $token = & ./scripts/Generate-ResourceToken.ps1 `
+              -SubscriptionId $subscriptionId `
+              -EnvironmentName $environmentName `
+              -Location $location
+
+          echo "resource_token=$token" >> $env:GITHUB_ENV
+          echo "ACR_NAME=${{ vars.CONTAINER_REGISTRY_NAME }}$token" >> $env:GITHUB_ENV
+
+      - name: Azure Container Registry Login
+        if: ${{ inputs.push-to-acr == true }}
+        run: az acr login --name $ACR_NAME
+
+      - name: Get Version from Changelog
+        id: get-version
+        run: |
+          if [ -n "${{ inputs.semantic-version }}" ]; then
+            VERSION="${{ inputs.semantic-version }}"
+            echo "📋 Using provided version: $VERSION"
+          else
+            CHANGELOG_FILE="${{ inputs.service-path }}/${{ inputs.changelog-file }}"
+            chmod +x ./scripts/get-changelog-version.sh
+            VERSION=$(./scripts/get-changelog-version.sh "$CHANGELOG_FILE")
+            echo "📋 Version from $CHANGELOG_FILE: $VERSION"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build ${{ inputs.service-name }} Docker Image
+        run: |
+          COMMIT_SHA="${{ inputs.commit-sha || github.sha }}"
+          VERSION="${{ steps.get-version.outputs.version }}"
+          SERVICE_NAME="${{ inputs.service-name }}"
+          CONTAINER_NAME="${SERVICE_NAME}-container"
+
+          if [ "${{ inputs.push-to-acr }}" = "true" ]; then
+            IMAGE_NAME="$ACR_NAME.azurecr.io/$CONTAINER_NAME"
+          else
+            IMAGE_NAME="$CONTAINER_NAME"
+          fi
+
+          echo "📦 Service: $SERVICE_NAME"
+          echo "🏷️  Container name: $CONTAINER_NAME"
+
+          # Build with multiple tags
+          docker build \
+            -t "$IMAGE_NAME:$COMMIT_SHA" \
+            -t "$IMAGE_NAME:latest" \
+            -t "$IMAGE_NAME:$VERSION" \
+            -f ${{ inputs.service-path }}/Dockerfile .
+
+          echo "✅ Built image: $CONTAINER_NAME"
+          echo "🏷️  Tags: $COMMIT_SHA, latest, $VERSION"
+
+      - name: Push ${{ inputs.service-name }} Image to ACR
+        if: ${{ inputs.push-to-acr == true }}
+        run: |
+          COMMIT_SHA="${{ inputs.commit-sha || github.sha }}"
+          VERSION="${{ steps.get-version.outputs.version }}"
+          SERVICE_NAME="${{ inputs.service-name }}"
+          CONTAINER_NAME="${SERVICE_NAME}-container"
+          IMAGE_NAME="$ACR_NAME.azurecr.io/$CONTAINER_NAME"
+
+          echo "🚀 Pushing $CONTAINER_NAME to ACR..."
+          docker push "$IMAGE_NAME:$COMMIT_SHA"
+          docker push "$IMAGE_NAME:latest"
+          docker push "$IMAGE_NAME:$VERSION"
+
+          echo "✅ Pushed $CONTAINER_NAME with tags: $COMMIT_SHA, latest, $VERSION"
+
+      - name: Cleanup Docker Images
+        if: always()
+        run: |
+          COMMIT_SHA="${{ inputs.commit-sha || github.sha }}"
+          VERSION="${{ steps.get-version.outputs.version }}"
+          SERVICE_NAME="${{ inputs.service-name }}"
+          CONTAINER_NAME="${SERVICE_NAME}-container"
+
+          echo "🧹 Cleaning up Docker images to free disk space..."
+
+          # Remove built images conditionally based on push-to-acr flag
+          if [ "${{ inputs.push-to-acr }}" = "true" ]; then
+            # Clean up ACR-tagged images
+            docker rmi "$ACR_NAME.azurecr.io/$CONTAINER_NAME:$COMMIT_SHA" || true
+            docker rmi "$ACR_NAME.azurecr.io/$CONTAINER_NAME:latest" || true
+            docker rmi "$ACR_NAME.azurecr.io/$CONTAINER_NAME:$VERSION" || true
+          else
+            # Clean up local images
+            docker rmi "$CONTAINER_NAME:$COMMIT_SHA" || true
+            docker rmi "$CONTAINER_NAME:latest" || true
+            docker rmi "$CONTAINER_NAME:$VERSION" || true
+          fi
+
+          # Remove any dangling images
+          docker image prune -f || true
+
+          echo "✅ Docker cleanup completed for $CONTAINER_NAME"
